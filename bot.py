@@ -121,22 +121,23 @@ async def on_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
+
     try:
         action, chat_id, user_id = q.data.split(":")
-        chat_id = int(chat_id); user_id = int(user_id)
+        chat_id = int(chat_id)
+        user_id = int(user_id)
     except Exception:
         return
 
     key = (chat_id, user_id)
     actor_id = q.from_user.id
 
-    # Only allow the targeted user or an admin to press the buttons
+    # Only the targeted user can press their button
     if actor_id != user_id:
-        # show a tiny alert and ignore
-        await q.answer("This button isn’t for you.", show_alert=True)
+        await q.answer("Эта кнопка не для вас.", show_alert=True)
         return
 
-    # Clean consent message
+    # Delete the original consent message if still around
     try:
         await context.bot.delete_message(chat_id, PENDING.get(key, {}).get("msg_id", q.message.message_id))
     except Exception:
@@ -148,40 +149,47 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.restrict_chat_member(chat_id, user_id, permissions=UNMUTED)
         except Exception:
             pass
-        await q.edit_message_text("✅ You’re all set — welcome!", disable_web_page_preview=True)
-        await asyncio.sleep(3)
+
+        # Short welcome message
+        m = await context.bot.send_message(
+            chat_id,
+            f"✅ <a href='tg://user?id={user_id}'>Добро пожаловать!</a>",
+            parse_mode="HTML"
+        )
+        # Auto-delete after 5 sec
+        await asyncio.sleep(5)
         try:
-            await context.bot.delete_message(q.message.chat_id, q.message.message_id)
+            await context.bot.delete_message(chat_id, m.message_id)
         except Exception:
             pass
-else:
-    try:
-        # Kick user once
-        await context.bot.ban_chat_member(chat_id, user_id)
-        # Immediately unban so they can rejoin right away
-        await context.bot.unban_chat_member(chat_id, user_id)
-    except Exception:
-        pass
 
-    # Send a short confirmation instead of editing the deleted message
-    m = await context.bot.send_message(
-        chat_id,
-        f"❌ <a href='tg://user?id={user_id}'>Пользователь</a> отказался и был удалён. "
-        "Он может вернуться, если передумает.",
-        parse_mode="HTML"
-    )
+    elif action == "decline":
+        # Kick + unban so they can rejoin instantly
+        try:
+            await context.bot.ban_chat_member(chat_id, user_id)
+            await context.bot.unban_chat_member(chat_id, user_id)
+        except Exception:
+            pass
 
-    # Auto-delete after 5 seconds to keep the group clean
-    await asyncio.sleep(5)
-    try:
-        await context.bot.delete_message(chat_id, m.message_id)
-    except Exception:
-        pass
+        # Short decline message
+        m = await context.bot.send_message(
+            chat_id,
+            f"❌ <a href='tg://user?id={user_id}'>Пользователь</a> отказался и был удалён. "
+            "Он может вернуться, если передумает.",
+            parse_mode="HTML"
+        )
+        # Auto-delete after 5 sec
+        await asyncio.sleep(5)
+        try:
+            await context.bot.delete_message(chat_id, m.message_id)
+        except Exception:
+            pass
 
-    # Cancel pending timeout
+    # Cancel timeout if any
     if key in PENDING and PENDING[key].get("task"):
         PENDING[key]["task"].cancel()
     PENDING.pop(key, None)
+
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("I work automatically when new members join. Make me an admin with 'Delete messages' and 'Restrict members'.")
