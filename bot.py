@@ -1,85 +1,122 @@
-import os
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+import os, asyncio
+from datetime import timedelta
+from telegram import (
+    Update,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    ChatPermissions,
+)
 from telegram.ext import (
     Application,
-    ChatJoinRequestHandler,
+    MessageHandler,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    filters,
 )
 
-# ----- ENV VARS -----
-BOT_TOKEN = os.getenv("BOT_TOKEN")                # from @BotFather, no quotes/spaces
-CHANNEL_ID = os.getenv("CHANNEL_ID")              # e.g. -1001234567890 or @YourChannel
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 CONSENT_VERSION = os.getenv("CONSENT_VERSION", "1.0")
 POLICY_URL = os.getenv("POLICY_URL", "https://example.com/privacy")
+KICK_AFTER_SECONDS = int(os.getenv("KICK_AFTER_SECONDS", "300"))  # 5 minutes
 
-# Basic safety checks
 if not BOT_TOKEN:
     raise SystemExit("Missing BOT_TOKEN env var")
 
-CONSENT_MESSAGE = (
-    "To join this channel, please confirm your consent to the processing of your personal data.\n\n"
-    "We only process what Telegram provides during this action (your account identity) to decide on access.\n"
-    "We do NOT store any logs of your decision.\n\n"
-    f"📄 Privacy Policy: {POLICY_URL}\n\n"
-    f"By pressing ✅ I Consent, you agree to this (v{CONSENT_VERSION})."
+CONSENT_TEXT = (
+    "👋 Добро пожаловать в группу Mishanya, {name}!\n\n"
+    "Чтобы продолжить, просьба дать **согласие на обработку персональных данных**. "
+    "Мы **не храним** ваши персональные данные.\n\n"
+    f"📄 Политика Конфиденциальности: {POLICY_URL}\n\n"
 )
 
-# ----- HANDLERS -----
-async def on_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    req = update.chat_join_request
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ I Consent", callback_data=f"consent:yes:{req.user_chat_id}:{req.from_user.id}"),
-         InlineKeyboardButton("❌ No",        callback_data=f"consent:no:{req.user_chat_id}:{req.from_user.id}")]
-    ])
+# In-memory pending map: key=(chat_id, user_id) -> {task, msg_id}
+PENDING: dict[tuple[int, int], dict] = {}
+
+MUTED = ChatPermissions(  # can read only
+    can_send_messages=False,
+    can_send_audios=False,
+    can_send_documents=False,
+    can_send_photos=False,
+    can_send_videos=False,
+    can_send_video_notes=False,
+    can_send_voice_notes=False,
+    can_send_polls=False,
+    can_send_other_messages=False,
+    can_add_web_page_previews=False,
+    can_change_info=False,
+    can_invite_users=False,
+    can_pin_messages=False,
+)
+
+UNMUTED = ChatPermissions(  # default: allow sending messages
+    can_send_messages=True,
+    can_send_audios=True,
+    can_send_documents=True,
+    can_send_photos=True,
+    can_send_videos=True,
+    can_send_video_notes=True,
+    can_send_voice_notes=True,
+    can_send_polls=True,
+    can_send_other_messages=True,
+    can_add_web_page_previews=True,
+)
+
+async def _schedule_kick(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, msg_id: int):
+    """Kick user after timeout if still pending."""
     try:
-        await context.bot.send_message(
-            chat_id=req.user_chat_id,
-            text=CONSENT_MESSAGE,
-            reply_markup=keyboard,
-        )
+        await asyncio.sleep(KICK_AFTER_SECONDS)
+        key = (chat_id, user_id)
+        if key in PENDING:
+            # still pending → kick
+            await context.bot.ban_chat_member(chat_id, user_id, until_date=timedelta(seconds=60))  # short ban
+            # cleanup consent message if still there
+            try:
+                await context.bot.delete_message(chat_id, msg_id)
+            except Exception:
+                pass
+            PENDING.pop(key, None)
+            # Optional: post a short note (auto-delete)
+            try:
+                m = await context.bot.send_message(chat_id, f"⏰ <a href='tg://user?id={user_id}'>User</a> did not accept in time and was removed.", parse_mode="HTML")
+                await asyncio.sleep(5)
+                await context.bot.delete_message(chat_id, m.message_id)
+            except Exception:
+                pass
     except Exception:
-        # If DM fails for any reason, leave the request pending for a human admin
         pass
 
-async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    try:
-        tag, choice, user_chat_id, from_user_id = query.data.split(":")
-    except Exception:
-        return
-    if tag != "consent":
+async def on_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg.new_chat_members:
         return
 
-    from_user_id = int(from_user_id)
+    for user in msg.new_chat_members:
+        # Immediately mute the new member
+        try:
+            await context.bot.restrict_chat_member(chat.id, user.id, permissions=MUTED)
+        except Exception:
+            # Bot must be admin with "Restrict members" permission
+            continue
 
-    if choice == "yes":
-        await context.bot.approve_chat_join_request(chat_id=CHANNEL_ID, user_id=from_user_id)
-        await query.edit_message_text("Thanks! Your request has been approved. Welcome 👋")
-    else:
-        await context.bot.decline_chat_join_request(chat_id=CHANNEL_ID, user_id=from_user_id)
-        await query.edit_message_text("Understood. Your request was declined.")
+        # Post consent message in-group, addressed to the user
+        text = CONSENT_TEXT.format(name=(user.first_name or "there"))
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ I accept", callback_data=f"accept:{chat.id}:{user.id}"),
+            InlineKeyboardButton("❌ Decline", callback_data=f"decline:{chat.id}:{user.id}"),
+        ]])
+        try:
+            m = await context.bot.send_message(chat.id, text, reply_markup=keyboard, disable_web_page_preview=True)
+        except Exception:
+            continue
 
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Optional manual start (for pinned post / deep-link like t.me/YourBot?start=consent)
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ I Consent", callback_data=f"consent:yes:{update.effective_chat.id}:{update.effective_user.id}"),
-         InlineKeyboardButton("❌ No",        callback_data=f"consent:no:{update.effective_chat.id}:{update.effective_user.id}")]
-    ])
-    await update.message.reply_text(CONSENT_MESSAGE, reply_markup=keyboard)
+        # Remember pending + start timeout task
+        key = (chat.id, user.id)
+        # Cancel any previous (shouldn't happen, but safe)
+        if key in PENDING and PENDING[key].get("task"):
+            PENDING[key]["task"].cancel()
+        task = asyncio.create_task(_schedule_kick(context, chat.id, user.id, m.message_id))
+        PENDING[key] = {"task": task, "msg_id": m.message_id}
 
-# ----- APP BOOTSTRAP (PTB v22.x) -----
-def build_app() -> Application:
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(ChatJoinRequestHandler(on_join_request))
-    app.add_handler(CallbackQueryHandler(handle_button))
-    app.add_handler(CommandHandler("start", start_cmd))
-    return app
-
-if __name__ == "__main__":
-    app = build_app()
-    print("Bot running… (no logs mode)")
-    # Blocks and keeps the bot alive; no manual initialize/start/idle needed
-    app.run_polling(allowed_updates=["chat_join_request", "callback_query", "message"])
+async def
