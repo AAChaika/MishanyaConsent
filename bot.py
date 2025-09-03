@@ -24,10 +24,11 @@ if not BOT_TOKEN:
     raise SystemExit("Missing BOT_TOKEN env var")
 
 CONSENT_TEXT = (
-    "👋 Добро пожаловать в группу Mishanya, {name}!\n\n"
-    "Чтобы продолжить, просьба дать **согласие на обработку персональных данных**. "
-    "Мы **не храним** ваши персональные данные.\n\n"
-    f"📄 Политика Конфиденциальности: {POLICY_URL}\n\n"
+    "👋 Welcome, {name}!\n\n"
+    "Before you can participate, please confirm **consent to personal data processing** "
+    "used only to administer group access. We do **not** store logs.\n\n"
+    f"📄 Privacy Policy: {POLICY_URL}\n\n"
+    f"Tap **✅ I accept** within **5 minutes**, or you’ll be removed. (v{CONSENT_VERSION})"
 )
 
 # In-memory pending map: key=(chat_id, user_id) -> {task, msg_id}
@@ -119,4 +120,71 @@ async def on_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
         task = asyncio.create_task(_schedule_kick(context, chat.id, user.id, m.message_id))
         PENDING[key] = {"task": task, "msg_id": m.message_id}
 
-async def
+async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    try:
+        action, chat_id, user_id = q.data.split(":")
+        chat_id = int(chat_id); user_id = int(user_id)
+    except Exception:
+        return
+
+    key = (chat_id, user_id)
+    actor_id = q.from_user.id
+
+    # Only allow the targeted user or an admin to press the buttons
+    if actor_id != user_id:
+        # show a tiny alert and ignore
+        await q.answer("This button isn’t for you.", show_alert=True)
+        return
+
+    # Clean consent message
+    try:
+        await context.bot.delete_message(chat_id, PENDING.get(key, {}).get("msg_id", q.message.message_id))
+    except Exception:
+        pass
+
+    if action == "accept":
+        # Unmute user
+        try:
+            await context.bot.restrict_chat_member(chat_id, user_id, permissions=UNMUTED)
+        except Exception:
+            pass
+        await q.edit_message_text("✅ You’re all set — welcome!", disable_web_page_preview=True)
+        await asyncio.sleep(3)
+        try:
+            await context.bot.delete_message(q.message.chat_id, q.message.message_id)
+        except Exception:
+            pass
+    else:
+        # Decline path: kick immediately
+        try:
+            await context.bot.ban_chat_member(chat_id, user_id, until_date=timedelta(seconds=60))
+        except Exception:
+            pass
+        await q.edit_message_text("❌ Understood. You were removed. You may rejoin later.", disable_web_page_preview=True)
+        await asyncio.sleep(3)
+        try:
+            await context.bot.delete_message(q.message.chat_id, q.message.message_id)
+        except Exception:
+            pass
+
+    # Cancel pending timeout
+    if key in PENDING and PENDING[key].get("task"):
+        PENDING[key]["task"].cancel()
+    PENDING.pop(key, None)
+
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("I work automatically when new members join. Make me an admin with 'Delete messages' and 'Restrict members'.")
+
+def build_app() -> Application:
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_members))
+    app.add_handler(CallbackQueryHandler(on_button))
+    app.add_handler(CommandHandler("start", start_cmd))
+    return app
+
+if __name__ == "__main__":
+    app = build_app()
+    print("Bot running… (group consent, 5-min kick, no logs)")
+    app.run_polling(allowed_updates=["message", "callback_query"])
