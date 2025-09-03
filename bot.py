@@ -24,13 +24,11 @@ if not BOT_TOKEN:
     raise SystemExit("Missing BOT_TOKEN env var")
 
 CONSENT_TEXT = (
-    "👋 Welcome, {name}!\n\n"
-    "Before you can participate, please confirm **consent to personal data processing** "
-    "used only to administer group access. We do **not** store logs.\n\n"
-    f"📄 Privacy Policy: {POLICY_URL}\n\n"
-    f"Tap **✅ I accept** within **5 minutes**, or you’ll be removed. (v{CONSENT_VERSION})"
+    "👋 Добро пожаловать в группу Mishanya, {name}!\n\n"
+    "Чтобы продолжить, просьба дать **согласие на обработку персональных данных**. "
+    "Мы **не храним** ваши персональные данные.\n\n"
+    f"📄 Политика Конфиденциальности: {POLICY_URL}\n\n"
 )
-
 # In-memory pending map: key=(chat_id, user_id) -> {task, msg_id}
 PENDING: dict[tuple[int, int], dict] = {}
 
@@ -158,16 +156,16 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
     else:
         # Decline path: kick immediately
-        try:
-            await context.bot.ban_chat_member(chat_id, user_id, until_date=timedelta(seconds=60))
-        except Exception:
-            pass
-        await q.edit_message_text("❌ Understood. You were removed. You may rejoin later.", disable_web_page_preview=True)
-        await asyncio.sleep(3)
-        try:
-            await context.bot.delete_message(q.message.chat_id, q.message.message_id)
-        except Exception:
-            pass
+       else:
+    try:
+        # Kick user once
+        await context.bot.ban_chat_member(chat_id, user_id)
+        # Immediately unban so they can rejoin right away
+        await context.bot.unban_chat_member(chat_id, user_id)
+    except Exception:
+        pass
+    await q.edit_message_text("❌ Вы отказались. Доступ закрыт. "
+                              "Вы можете присоединиться снова, если передумаете.")
 
     # Cancel pending timeout
     if key in PENDING and PENDING[key].get("task"):
