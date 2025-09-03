@@ -155,8 +155,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
     else:
-        # Decline path: kick immediately
-       else:
     try:
         # Kick user once
         await context.bot.ban_chat_member(chat_id, user_id)
@@ -164,13 +162,26 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.unban_chat_member(chat_id, user_id)
     except Exception:
         pass
-    await q.edit_message_text("❌ Вы отказались. Доступ закрыт. "
-                              "Вы можете присоединиться снова, если передумаете.")
+
+    # Send a short confirmation instead of editing the deleted message
+    m = await context.bot.send_message(
+        chat_id,
+        f"❌ <a href='tg://user?id={user_id}'>Пользователь</a> отказался и был удалён. "
+        "Он может вернуться, если передумает.",
+        parse_mode="HTML"
+    )
+    # Auto-delete after 5 seconds to keep the group clean
+    await asyncio.sleep(5)
+    try:
+        await context.bot.delete_message(chat_id, m.message_id)
+    except Exception:
+        pass
 
     # Cancel pending timeout
     if key in PENDING and PENDING[key].get("task"):
         PENDING[key]["task"].cancel()
     PENDING.pop(key, None)
+
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("I work automatically when new members join. Make me an admin with 'Delete messages' and 'Restrict members'.")
